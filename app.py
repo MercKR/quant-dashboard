@@ -722,7 +722,7 @@ with tab_market:
             try: return "color:#3d9270" if float(v) > 0 else ("color:#b06868" if float(v) < 0 else "")
             except: return ""
         st.dataframe(
-            snap.style.applymap(_color, subset=["전일대비(%)"]).format("{:.2f}", na_rep="—"),
+            snap.style.map(_color, subset=["전일대비(%)"]).format("{:.2f}", na_rep="—"),
             use_container_width=True, height=300,
         )
 
