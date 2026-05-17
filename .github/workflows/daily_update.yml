@@ -1,0 +1,39 @@
+name: Daily Data Update
+
+on:
+  schedule:
+    # 한국시간 기준 매일 오전 7시 (UTC 22:00 전날)
+    # 미국장 마감(EST 16:00 = KST 다음날 06:00) 후 수집
+    - cron: "0 22 * * 1-5"   # 월~금 UTC 22:00
+
+  workflow_dispatch:   # 수동 실행 허용
+
+jobs:
+  update-data:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Fetch latest data
+        run: python -c "import sys; sys.path.insert(0,'src'); from data_fetcher import fetch_all; fetch_all()"
+
+      - name: Commit & push updated data
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/
+          git diff --staged --quiet || git commit -m "chore: daily data update $(date -u +'%Y-%m-%d')"
+          git push
