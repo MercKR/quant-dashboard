@@ -39,6 +39,7 @@ section[data-testid="stSidebar"]{background:var(--bg2)!important;border-right:1p
 section[data-testid="stSidebar"] *{color:var(--sub)!important}
 section[data-testid="stSidebar"] strong{color:var(--text)!important}
 *,.stMarkdown,button,label,p,span,div{font-family:'JetBrains Mono',monospace!important}
+.material-symbols-rounded,.material-symbols-outlined,.material-symbols-sharp,.material-icons{font-family:'Material Symbols Rounded','Material Icons'!important}
 .stMarkdown p{color:var(--text)!important}
 .stMarkdown li{color:var(--sub)!important}
 div[data-testid="stTabs"] button{color:var(--sub)!important;font-size:.86rem!important;letter-spacing:.07em!important;text-transform:uppercase!important;padding:8px 20px!important;border-bottom:2px solid transparent!important}
