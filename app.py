@@ -38,8 +38,11 @@ header[data-testid="stHeader"]{background:var(--bg)!important;border-bottom:1px 
 section[data-testid="stSidebar"]{background:var(--bg2)!important;border-right:1px solid var(--border)!important}
 section[data-testid="stSidebar"] *{color:var(--sub)!important}
 section[data-testid="stSidebar"] strong{color:var(--text)!important}
-*,.stMarkdown,button,label,p,span,div{font-family:'JetBrains Mono',monospace!important}
-.material-symbols-rounded,.material-symbols-outlined,.material-symbols-sharp,.material-icons{font-family:'Material Symbols Rounded','Material Icons'!important}
+*:not(.material-symbols-rounded):not(.material-symbols-outlined):not(.material-symbols-sharp):not(.material-icons),
+.stMarkdown,button,label,p,
+span:not(.material-symbols-rounded):not(.material-symbols-outlined):not(.material-symbols-sharp):not(.material-icons),
+div{font-family:'JetBrains Mono',monospace!important}
+.material-symbols-rounded,.material-symbols-outlined,.material-symbols-sharp,.material-icons{font-family:'Material Symbols Rounded','Material Icons'!important;font-feature-settings:'liga';-webkit-font-feature-settings:'liga'}
 .stMarkdown p{color:var(--text)!important}
 .stMarkdown li{color:var(--sub)!important}
 div[data-testid="stTabs"] button{color:var(--sub)!important;font-size:.86rem!important;letter-spacing:.07em!important;text-transform:uppercase!important;padding:8px 20px!important;border-bottom:2px solid transparent!important}
@@ -61,12 +64,20 @@ hr{border-color:var(--border)!important;margin:20px 0!important}
 #MainMenu,footer{visibility:hidden}
 """
 
-# Inject CSS via script into parent document (works reliably in Streamlit 1.35+)
+# Inject CSS + Material Symbols font into parent document
 _css_escaped = _CSS.replace("`", "\\`").replace("\\", "\\\\")
 components.html(f"""
 <script>
 (function(){{
   if(document.getElementById('qa-custom-css'))return;
+  // Material Symbols 폰트 명시적 로드
+  if(!document.getElementById('qa-material-font')){{
+    const lk=window.parent.document.createElement('link');
+    lk.id='qa-material-font';
+    lk.rel='stylesheet';
+    lk.href='https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200';
+    window.parent.document.head.appendChild(lk);
+  }}
   const s=document.createElement('style');
   s.id='qa-custom-css';
   s.textContent=`{_css_escaped}`;
