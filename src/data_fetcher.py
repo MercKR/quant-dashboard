@@ -338,6 +338,32 @@ def fetch_stock_fundamentals(name: str, ticker: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+def search_tickers(query: str, max_results: int = 8) -> list[dict]:
+    """
+    yfinance.Search로 티커를 검색합니다.
+    한국 주식은 영문명 또는 종목코드(005930)로 검색.
+    반환: [{ticker, name, exchange, type}, ...]
+    """
+    try:
+        s = yf.Search(query.strip(), max_results=max_results)
+        results = []
+        for q in s.quotes:
+            ticker = q.get("symbol", "")
+            if not ticker:
+                continue
+            name = q.get("longname") or q.get("shortname") or ticker
+            results.append({
+                "ticker": ticker,
+                "name":   name,
+                "exchange": q.get("exchange", ""),
+                "type":   q.get("quoteType", ""),
+            })
+        return results
+    except Exception as e:
+        print(f"  [검색 오류] {e}")
+        return []
+
+
 def load_stock_fundamentals(name: str) -> pd.DataFrame:
     """저장된 펀더멘털 parquet 로드."""
     p = _fund_path(name)

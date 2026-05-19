@@ -16,6 +16,7 @@ from data_fetcher import (
     fetch_all, load_all, load_fund_all, ALL_SYMBOLS,
     load_user_stocks, save_user_stocks,
     fetch_user_stock, fetch_stock_fundamentals,
+    search_tickers,
 )
 from indicators import (
     compute_all, get_indicator_columns, get_all_indicator_columns,
@@ -527,31 +528,61 @@ with st.sidebar:
     # ── 개별종목 관리 ──────────────────────────────────────────────────────
     st.divider()
     st.caption("**개별종목 추가**")
-    new_ticker = st.text_input("티커", placeholder="AAPL  /  005930.KS", key="new_ticker",
-                                label_visibility="collapsed")
-    new_name   = st.text_input("표시 이름", placeholder="표시 이름 (예: 애플)", key="new_name",
-                                label_visibility="collapsed")
+    st.caption("영문 회사명·티커·종목코드로 검색  \n한국 주식: 영문명(Samsung) 또는 코드(005930)")
 
-    if st.button("＋ 종목 추가", use_container_width=True):
-        _ticker = new_ticker.strip().upper()
-        _name   = new_name.strip()
-        if not _ticker or not _name:
-            st.warning("티커와 이름을 모두 입력하세요.")
+    _sq = st.text_input(
+        "종목 검색",
+        placeholder="예) Apple  /  TSLA  /  Samsung  /  005930",
+        key="stock_search_q",
+        label_visibility="collapsed",
+    )
+    if st.button("🔍 검색", use_container_width=True, key="stock_search_btn"):
+        if _sq.strip():
+            with st.spinner("검색 중..."):
+                _found = search_tickers(_sq.strip())
+            st.session_state["_sr"] = _found
+            st.session_state["_sr_query"] = _sq.strip()
         else:
+            st.warning("검색어를 입력하세요.")
+
+    _sr = st.session_state.get("_sr", [])
+    if _sr:
+        _type_icon = {"EQUITY": "📈", "ETF": "🗂", "CRYPTOCURRENCY": "₿",
+                      "FUTURE": "⏱", "INDEX": "📊"}
+        _opt_labels = [
+            f"{_type_icon.get(r['type'], '·')} {r['ticker']}  —  {r['name']}  [{r['exchange']}]"
+            for r in _sr
+        ]
+        _sel_i = st.selectbox(
+            "검색 결과",
+            range(len(_opt_labels)),
+            format_func=lambda i: _opt_labels[i],
+            key="stock_sel_i",
+            label_visibility="collapsed",
+        )
+        _sel = _sr[_sel_i]
+
+        if st.button("＋ 추가", use_container_width=True, key="stock_add_btn"):
+            _ticker = _sel["ticker"]
+            _name   = _sel["name"]
             _user_stocks = load_user_stocks()
-            if any(s["ticker"] == _ticker or s["name"] == _name for s in _user_stocks):
+            if any(s["ticker"] == _ticker for s in _user_stocks):
                 st.warning("이미 추가된 종목입니다.")
             else:
-                with st.spinner(f"{_name} 데이터 수집 중..."):
+                with st.spinner(f"{_name} 수집 중..."):
                     _price, _fund = fetch_user_stock(_name, _ticker, verbose=False)
                 if _price.empty:
-                    st.error(f"'{_ticker}' 데이터를 가져올 수 없습니다. 티커를 확인하세요.")
+                    st.error(f"'{_ticker}' 데이터를 가져올 수 없습니다.")
                 else:
                     _user_stocks.append({"name": _name, "ticker": _ticker})
                     save_user_stocks(_user_stocks)
+                    st.session_state.pop("_sr", None)
                     st.cache_data.clear()
                     st.success(f"{_name} 추가 완료!")
                     st.rerun()
+
+    elif "_sr_query" in st.session_state and not _sr:
+        st.info("검색 결과가 없습니다. 다른 검색어를 사용해보세요.")
 
     # 추가된 종목 목록 + 삭제
     _user_stocks_now = load_user_stocks()
@@ -559,16 +590,17 @@ with st.sidebar:
         st.caption("**추가된 종목**")
         for _s in _user_stocks_now:
             _c1, _c2 = st.columns([3, 1])
-            _c1.caption(f"{_s['name']} ({_s['ticker']})")
+            _c1.caption(f"{_s['name']}  ({_s['ticker']})")
             if _c2.button("✕", key=f"del_{_s['ticker']}"):
                 _updated = [x for x in _user_stocks_now if x["ticker"] != _s["ticker"]]
                 save_user_stocks(_updated)
                 st.cache_data.clear()
                 st.rerun()
 
-    # 펀더멘털 재수집 버튼 (종목이 있을 때만 표시)
+    # 펀더멘털 재수집 버튼
     if _user_stocks_now:
-        if st.button("↺ 펀더멘털 재수집", use_container_width=True, help="분기 재무 데이터를 최신화합니다."):
+        if st.button("↺ 펀더멘털 재수집", use_container_width=True,
+                     help="분기 재무 데이터를 최신화합니다."):
             with st.spinner("펀더멘털 수집 중..."):
                 for _s in _user_stocks_now:
                     fetch_stock_fundamentals(_s["name"], _s["ticker"])
