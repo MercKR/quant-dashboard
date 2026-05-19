@@ -6,6 +6,7 @@ Data fetcher
   - yfinance quarterly financials : 개별종목 펀더멘털
 """
 
+import io
 import json
 import time
 import requests
@@ -29,6 +30,7 @@ USER_STOCKS_PATH = DATA_DIR / "user_stocks.json"
 
 # ── 기본 종목 정의 ────────────────────────────────────────────────────────────
 
+# 자산 (가격 시계열)
 YFINANCE_SYMBOLS = {
     "S&P500":      "^GSPC",
     "원유선물":     "CL=F",
@@ -42,7 +44,33 @@ FDR_SYMBOLS = {
     "은선물":        "144600",
 }
 
-ALL_SYMBOLS = list(YFINANCE_SYMBOLS) + list(FDR_SYMBOLS) + ["비트코인"]
+# 매크로 지표 — yfinance
+MACRO_YF_SYMBOLS = {
+    "VIX":        "^VIX",
+    "VIX 3개월":  "^VIX3M",
+    "MOVE 지수":  "^MOVE",
+    "SKEW 지수":  "^SKEW",
+    "VVIX":       "^VVIX",
+    "달러지수":    "DX-Y.NYB",
+    "구리선물":    "HG=F",
+    "미국채10년":  "^TNX",
+}
+
+# 매크로 지표 — FRED (https://fred.stlouisfed.org, API 키 불필요)
+MACRO_FRED_SYMBOLS = {
+    "장단기금리차10Y2Y": "T10Y2Y",
+    "장단기금리차10Y3M": "T10Y3M",
+    "하이일드스프레드":   "BAMLH0A0HYM2",
+    "투자등급스프레드":   "BAMLC0A0CM",
+    "금융여건지수":       "NFCI",
+}
+
+# 매크로 파생 지표 (수집한 시리즈로 계산)
+MACRO_DERIVED = ["VIX 기간구조", "구리금비율"]
+
+ASSET_SYMBOLS = list(YFINANCE_SYMBOLS) + list(FDR_SYMBOLS) + ["비트코인"]
+MACRO_SYMBOLS = list(MACRO_YF_SYMBOLS) + list(MACRO_FRED_SYMBOLS) + MACRO_DERIVED
+ALL_SYMBOLS = ASSET_SYMBOLS + MACRO_SYMBOLS
 
 
 # ── 공통 유틸 ────────────────────────────────────────────────────────────────
@@ -185,6 +213,56 @@ def fetch_bitcoin() -> pd.DataFrame:
     return merged
 
 
+# ── FRED (매크로 지표) ────────────────────────────────────────────────────────
+
+def fetch_fred(symbol_name: str, series_id: str, start: str = "2010-01-01") -> pd.DataFrame:
+    """FRED 시계열을 CSV로 직접 수집 (API 키 불필요). OHLCV 형식으로 저장."""
+    existing = _load_existing(symbol_name)
+    if not existing.empty:
+        start = (existing.index[-1] + timedelta(days=1)).strftime("%Y-%m-%d")
+    try:
+        url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}&cosd={start}"
+        resp = requests.get(url, timeout=20)
+        raw = pd.read_csv(io.StringIO(resp.text))
+        raw.columns = ["Date", "val"]
+        raw["Date"] = pd.to_datetime(raw["Date"], errors="coerce")
+        raw["val"]  = pd.to_numeric(raw["val"], errors="coerce")
+        raw = raw.dropna().set_index("Date")
+        if raw.empty:
+            return existing
+        val = raw["val"]
+        df = pd.DataFrame({"Open": val, "High": val, "Low": val,
+                           "Close": val, "Volume": 0.0})
+        df.index = pd.to_datetime(df.index).tz_localize(None)
+        merged = _merge(existing, df)
+        _save(symbol_name, merged)
+        return merged
+    except Exception as e:
+        print(f"  [오류] {symbol_name} (FRED {series_id}): {e}")
+        return existing
+
+
+def _build_derived(results: dict) -> dict:
+    """수집된 시리즈로 매크로 파생 지표(비율)를 계산해 results에 추가·저장."""
+    def _ratio(name: str, num: str, den: str):
+        a, b = results.get(num), results.get(den)
+        if a is None or b is None or a.empty or b.empty:
+            return
+        idx = a.index.intersection(b.index)
+        if idx.empty:
+            return
+        r = (a.loc[idx, "Close"] / b.loc[idx, "Close"].replace(0, np.nan)).dropna()
+        if r.empty:
+            return
+        df = pd.DataFrame({"Open": r, "High": r, "Low": r, "Close": r, "Volume": 0.0})
+        _save(name, df)
+        results[name] = df
+
+    _ratio("VIX 기간구조", "VIX", "VIX 3개월")   # >1 = 백워데이션(스트레스)
+    _ratio("구리금비율", "구리선물", "금선물")     # 상승 = 리플레이션
+    return results
+
+
 # ── 개별종목 펀더멘털 ─────────────────────────────────────────────────────────
 
 def fetch_stock_fundamentals(name: str, ticker: str) -> pd.DataFrame:
@@ -305,8 +383,11 @@ def fetch_stock_fundamentals(name: str, ticker: str) -> pd.DataFrame:
                 "roic":             safe_div(nopat, ic) * 100,
                 "ttm_rev":          t_rev,
                 "ttm_ebit":         t_ebit,
+                "ttm_ebitda":       eff_ebitda,
                 "ttm_ni":           t_ni,
                 "ttm_fcf":          t_fcf,
+                "total_debt":       td,
+                "cash":             cash,
                 "total_assets":     ta,
                 "total_liabilities": tl,
                 "working_capital":  wc,
@@ -403,6 +484,19 @@ def fetch_all(verbose: bool = True) -> dict[str, pd.DataFrame]:
 
     if verbose: print("수집 중: 비트코인 (Binance)")
     results["비트코인"] = fetch_bitcoin()
+
+    # ── 매크로 지표 ──────────────────────────────────────────────────────────
+    for name, ticker in MACRO_YF_SYMBOLS.items():
+        if verbose: print(f"수집 중: {name} ({ticker})")
+        results[name] = fetch_yfinance(name, ticker)
+        time.sleep(0.3)
+
+    for name, series_id in MACRO_FRED_SYMBOLS.items():
+        if verbose: print(f"수집 중: {name} (FRED {series_id})")
+        results[name] = fetch_fred(name, series_id)
+        time.sleep(0.2)
+
+    _build_derived(results)
 
     # 사용자 추가 종목 가격도 함께 업데이트
     for stock in load_user_stocks():

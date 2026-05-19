@@ -44,6 +44,39 @@ def _apply_op(series: pd.Series, op: str, value) -> pd.Series:
     return fn(series, value).fillna(False)
 
 
+def build_signal_mask(
+    data: dict[str, pd.DataFrame],
+    conditions: list[dict],
+    logic: str,
+) -> pd.Series:
+    """
+    조건 집합을 만족하는 날짜의 boolean 마스크를 반환한다.
+    조건이 없거나 종목·지표 데이터가 부족하면 빈 Series를 반환한다.
+    분석 엔진(run_analysis)과 백테스트 엔진이 동일한 조건 정의를 공유하기 위한 헬퍼.
+    """
+    if not conditions:
+        return pd.Series(dtype=bool)
+
+    masks = []
+    for cond in conditions:
+        sym, indic, op, val = cond["symbol"], cond["indicator"], cond["op"], cond["value"]
+        if sym not in data or data[sym].empty or indic not in data[sym].columns:
+            return pd.Series(dtype=bool)
+        masks.append(_apply_op(data[sym][indic], op, val))
+
+    common_idx = masks[0].index
+    for m in masks[1:]:
+        common_idx = common_idx.intersection(m.index)
+    if common_idx.empty:
+        return pd.Series(dtype=bool)
+
+    masks = [m.reindex(common_idx) for m in masks]
+    combined = masks[0]
+    for m in masks[1:]:
+        combined = (combined & m) if logic == "AND" else (combined | m)
+    return combined.fillna(False).astype(bool)
+
+
 def run_analysis(
     data: dict[str, pd.DataFrame],       # symbol → 지표 포함 DataFrame
     conditions: list[dict],              # 조건 목록

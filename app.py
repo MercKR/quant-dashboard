@@ -13,16 +13,16 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from data_fetcher import (
-    fetch_all, load_all, load_fund_all, ALL_SYMBOLS,
+    fetch_all, load_all, load_fund_all, ALL_SYMBOLS, ASSET_SYMBOLS, MACRO_SYMBOLS,
     load_user_stocks, save_user_stocks,
     fetch_user_stock, fetch_stock_fundamentals,
-    search_tickers,
 )
 from indicators import (
     compute_all, get_indicator_columns, get_all_indicator_columns,
     get_indicator_label, INDICATOR_META, FUND_INDICATOR_COLS,
 )
 from analysis import run_analysis, run_temporal_stability, OP_LABELS, OPS
+from backtest import run_backtest
 
 # ── 페이지 설정 ──────────────────────────────────────────────────────────────
 
@@ -34,7 +34,6 @@ st.set_page_config(
 )
 
 _CSS = """
-@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Syne:wght@700;800&display=swap');
 :root{
   --bg:#111318;--bg2:#191d26;--border:#272d3e;
   --text:#cdd6e0;--sub:#7a8899;--dim:#505b6a;
@@ -46,11 +45,11 @@ header[data-testid="stHeader"]{background:var(--bg)!important;border-bottom:1px 
 section[data-testid="stSidebar"]{background:var(--bg2)!important;border-right:1px solid var(--border)!important}
 section[data-testid="stSidebar"] *{color:var(--sub)!important}
 section[data-testid="stSidebar"] strong{color:var(--text)!important}
-*:not(.material-symbols-rounded):not(.material-symbols-outlined):not(.material-symbols-sharp):not(.material-icons),
+*:not(.material-symbols-rounded):not(.material-symbols-outlined):not(.material-symbols-sharp):not(.material-icons):not([data-testid="stIconMaterial"]),
 .stMarkdown,button,label,p,
-span:not(.material-symbols-rounded):not(.material-symbols-outlined):not(.material-symbols-sharp):not(.material-icons),
-div{font-family:'JetBrains Mono',monospace!important}
-.material-symbols-rounded,.material-symbols-outlined,.material-symbols-sharp,.material-icons{font-family:'Material Symbols Rounded','Material Icons'!important;font-feature-settings:'liga';-webkit-font-feature-settings:'liga'}
+span:not(.material-symbols-rounded):not(.material-symbols-outlined):not(.material-symbols-sharp):not(.material-icons):not([data-testid="stIconMaterial"]),
+div{font-family:Arial,'Malgun Gothic',sans-serif!important}
+.material-symbols-rounded,.material-symbols-outlined,.material-symbols-sharp,.material-icons,[data-testid="stIconMaterial"]{font-family:'Material Symbols Rounded','Material Icons'!important;font-feature-settings:'liga';-webkit-font-feature-settings:'liga'}
 .stMarkdown p{color:var(--text)!important}
 .stMarkdown li{color:var(--sub)!important}
 div[data-testid="stTabs"] button{color:var(--sub)!important;font-size:.86rem!important;letter-spacing:.07em!important;text-transform:uppercase!important;padding:8px 20px!important;border-bottom:2px solid transparent!important}
@@ -67,7 +66,7 @@ hr{border-color:var(--border)!important;margin:20px 0!important}
 .rl{font-size:.68rem;color:var(--sub);margin-top:6px;text-transform:uppercase;letter-spacing:.1em}
 .rp{color:var(--green)}.rn{color:var(--red)}.ru{color:var(--amber)}.rb{color:var(--blue)}
 .warnbox{background:#1e1808;border-left:3px solid var(--amber);padding:10px 14px;border-radius:4px;font-size:.8rem;color:var(--amber);margin:10px 0}
-.ptitle{font-family:'Syne',monospace!important;font-size:1.5rem;font-weight:800;color:var(--text);letter-spacing:.14em;text-transform:uppercase}
+.ptitle{font-family:Arial,'Malgun Gothic',sans-serif!important;font-size:1.5rem;font-weight:800;color:var(--text);letter-spacing:.14em;text-transform:uppercase}
 .psub{font-size:.76rem;color:var(--sub);letter-spacing:.06em;text-transform:uppercase;margin-top:3px}
 #MainMenu,footer{visibility:hidden}
 """
@@ -120,10 +119,23 @@ ind_labels = {col: get_indicator_label(col) for col in indicator_cols}
 
 def ind_label(col): return ind_labels.get(col, col)
 
+# 종목 타입별 지표 세트 — 개별종목은 펀더멘털 포함, 시장/매크로는 기술 지표만
+_FUND_SET = set(FUND_INDICATOR_COLS)
+_BASE_INDS = get_indicator_columns()
+
+def _is_stock(symbol):
+    return symbol in _user_stock_names
+
+def _indicators_for(symbol):
+    """선택 종목 타입에 맞는 지표 목록. 개별종목이면 펀더멘털 지표 포함."""
+    if _is_stock(symbol):
+        return list(_BASE_INDS) + list(FUND_INDICATOR_COLS)
+    return list(_BASE_INDS)
+
 
 # ── 쿼리 HTML 빌더 ────────────────────────────────────────────────────────────
 
-def _select(el_id, css_cls, items, selected, label_fn=None, onchange=""):
+def _select(el_id, css_cls, items, selected, label_fn=None, onchange="", mark_fund=False):
     opts = ""
     sel_lbl = ""
     for v in items:
@@ -131,8 +143,12 @@ def _select(el_id, css_cls, items, selected, label_fn=None, onchange=""):
         is_sel = str(v) == str(selected)
         if is_sel:
             sel_lbl = lbl
-        sc = " selected" if is_sel else ""
-        opts += f'<div class="csel-opt{sc}" data-value="{v}">{lbl}</div>'
+        cls = "csel-opt"
+        if is_sel:
+            cls += " selected"
+        if mark_fund and v in _FUND_SET:
+            cls += " fund-opt"
+        opts += f'<div class="{cls}" data-value="{v}">{lbl}</div>'
     if not sel_lbl and items:
         sel_lbl = label_fn(items[0]) if label_fn else str(items[0])
     oc = f' data-onchange="{onchange}"' if onchange else ""
@@ -146,8 +162,10 @@ def _select(el_id, css_cls, items, selected, label_fn=None, onchange=""):
 
 def _cond_html(i, sym, ind, op, val, vmin, vmax, symbols, inds, is_last=False):
     bullets = ["①", "②", "③", "④"]
-    sym_sel = _select(f"q_sym{i}", "sym", symbols, sym)
-    ind_sel = _select(f"q_ind{i}", "ind", inds, ind, lambda c: ind_labels.get(c, c))
+    sym_sel = _select(f"q_sym{i}", "sym", symbols, sym,
+                      onchange=f"onSymChange('q_sym{i}','q_ind{i}')")
+    ind_sel = _select(f"q_ind{i}", "ind", inds, ind, lambda c: ind_labels.get(c, c),
+                      mark_fund=True)
     _op_vals = ["<", "<=", ">=", ">", "between"]
     _op_lbls = {"<":"미만","<=":"이하",">=":"이상",">":"초과","between":"사이"}
     op_sel = _select(f"q_op{i}", "op", _op_vals, op, lambda k: _op_lbls[k], onchange=f"onOpChange({i})")
@@ -199,8 +217,10 @@ def generate_query_html(start, end, n_cond, logic, cond_params,
     rem_vis = "" if n_cond > 1 else ' style="display:none"'
     add_vis = "" if n_cond < 4 else ' style="display:none"'
 
-    sym_sel  = _select("q_tsym", "sym", symbols, tgt_sym)
-    ind_sel  = _select("q_tind", "ind", inds, tgt_ind, lambda c: ind_labels.get(c, c))
+    sym_sel  = _select("q_tsym", "sym", symbols, tgt_sym,
+                       onchange="onSymChange('q_tsym','q_tind')")
+    ind_sel  = _select("q_tind", "ind", inds, tgt_ind, lambda c: ind_labels.get(c, c),
+                       mark_fund=True)
     fwd_map  = {1:"1거래일",3:"3거래일",5:"5거래일",10:"10거래일",20:"20거래일",60:"60거래일"}
     fwd_sel  = _select("q_fwd", "fwd", [1,3,5,10,20,60], fwd, lambda v: fwd_map[v])
     _rt_vals = ["mean", "above", "below"]
@@ -210,17 +230,17 @@ def generate_query_html(start, end, n_cond, logic, cond_params,
     thr_vis  = "inline-flex" if result_type != "mean" else "none"
     conn_fwd = "후 값의" if result_type == "mean" else "후 값이"
 
-    syms_j   = json.dumps(symbols)
-    inds_j   = json.dumps(inds)
+    syms_j       = json.dumps(symbols)
+    inds_j       = json.dumps(inds)
+    stock_syms_j = json.dumps(_user_stock_names)
 
     return f"""<!DOCTYPE html>
 <html>
 <head>
 <meta charset="UTF-8">
-<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
 <style>
 *{{box-sizing:border-box;margin:0;padding:0}}
-body{{font-family:'JetBrains Mono',monospace;background:#191d26;color:#cdd6e0;
+body{{font-family:Arial,'Malgun Gothic',sans-serif;background:#191d26;color:#cdd6e0;
      padding:20px 24px 72px 24px;font-size:1.05rem;line-height:1.75}}
 .qhdr{{font-size:0.68rem;text-transform:uppercase;letter-spacing:0.14em;color:#505b6a;
        margin-bottom:16px;display:flex;align-items:center;gap:8px}}
@@ -248,6 +268,7 @@ body{{font-family:'JetBrains Mono',monospace;background:#191d26;color:#cdd6e0;
            cursor:pointer;white-space:nowrap}}
 .csel-opt:hover{{background:#1e2840;color:#e8f0f8}}
 .csel-opt.selected{{color:#e0ecfc;font-weight:700;background:#1a2436}}
+.csel.hide-fund .csel-opt.fund-opt{{display:none}}
 .sym{{background:rgba(90,142,194,.10);border:1px solid rgba(90,142,194,.40);
       color:#7aaad4;min-width:88px}}
 .sym:hover,.sym:focus{{background:rgba(90,142,194,.18);border-color:#7aaad4}}
@@ -321,6 +342,7 @@ body{{font-family:'JetBrains Mono',monospace;background:#191d26;color:#cdd6e0;
 <script>
 const SYMS={syms_j};
 const INDS={inds_j};
+const STOCK_SYMS={stock_syms_j};
 let nCond={n_cond};
 let logic='{logic}';
 function getV(id){{
@@ -328,6 +350,25 @@ function getV(id){{
   if(!el)return'';
   return el.dataset.value!==undefined?el.dataset.value:(el.value||'');
 }}
+function applyIndSet(symId,indId){{
+  // 개별종목이면 펀더멘털 지표 노출, 시장/매크로 시리즈면 기술 지표만
+  const isStock=STOCK_SYMS.indexOf(getV(symId))>=0;
+  const indSel=document.getElementById(indId);
+  if(!indSel)return;
+  if(isStock){{indSel.classList.remove('hide-fund');return;}}
+  indSel.classList.add('hide-fund');
+  const cur=indSel.querySelector('.csel-opt.selected');
+  if(cur&&cur.classList.contains('fund-opt')){{
+    const first=indSel.querySelector('.csel-opt:not(.fund-opt)');
+    if(first){{
+      indSel.querySelectorAll('.csel-opt').forEach(function(o){{o.classList.remove('selected');}});
+      first.classList.add('selected');
+      indSel.dataset.value=first.dataset.value;
+      indSel.querySelector('.csel-val').textContent=first.textContent;
+    }}
+  }}
+}}
+function onSymChange(symId,indId){{applyIndSet(symId,indId);}}
 function initSelects(){{
   document.querySelectorAll('.csel').forEach(function(sel){{
     sel.addEventListener('click',function(e){{
@@ -369,6 +410,8 @@ function initSelects(){{
   document.addEventListener('click',function(){{
     document.querySelectorAll('.csel.open').forEach(function(s){{s.classList.remove('open');}});
   }});
+  for(let i=0;i<4;i++){{applyIndSet('q_sym'+i,'q_ind'+i);}}
+  applyIndSet('q_tsym','q_tind');
 }}
 document.addEventListener('DOMContentLoaded',initSelects);
 function toggleLogic(){{
@@ -449,6 +492,17 @@ function runAnalysis(){{
 </html>"""
 
 
+# ── 자동완성 컴포넌트 ────────────────────────────────────────────────────────
+
+_AC_TEMPLATE_PATH = Path(__file__).parent / "src" / "ac_template.html"
+
+
+@st.cache_resource
+def _get_ac_html() -> str:
+    """ac_template.html 반환 — DB는 /app/static/ticker_db.json fetch로 로드."""
+    return _AC_TEMPLATE_PATH.read_text(encoding="utf-8")
+
+
 # ── 쿼리 파라미터 파싱 ────────────────────────────────────────────────────────
 
 def _gp(key, default=""):
@@ -517,72 +571,56 @@ with st.sidebar:
         st.success("완료!")
         st.rerun()
     st.divider()
-    st.caption("데이터 현황")
+    st.caption("**자산**")
     for sym in available_symbols:
+        if sym in MACRO_SYMBOLS:
+            continue
         df = data[sym]
         last = df.index[-1].strftime("%m-%d") if not df.empty else "N/A"
         has_fund = any(c in df.columns for c in FUND_INDICATOR_COLS)
         fund_tag = " ·F" if has_fund else ""
         st.caption(f"**{sym}**: {len(df):,}일 · {last}{fund_tag}")
 
+    _macro_now = [s for s in available_symbols if s in MACRO_SYMBOLS]
+    if _macro_now:
+        st.caption("**매크로 지표**")
+        for sym in _macro_now:
+            df = data[sym]
+            last = df.index[-1].strftime("%m-%d") if not df.empty else "N/A"
+            st.caption(f"**{sym}**: {len(df):,}일 · {last}")
+
     # ── 개별종목 관리 ──────────────────────────────────────────────────────
     st.divider()
     st.caption("**개별종목 추가**")
-    st.caption("영문 회사명·티커·종목코드로 검색  \n한국 주식: 영문명(Samsung) 또는 코드(005930)")
 
-    _sq = st.text_input(
-        "종목 검색",
-        placeholder="예) Apple  /  TSLA  /  Samsung  /  005930",
-        key="stock_search_q",
-        label_visibility="collapsed",
-    )
-    if st.button("🔍 검색", use_container_width=True, key="stock_search_btn"):
-        if _sq.strip():
-            with st.spinner("검색 중..."):
-                _found = search_tickers(_sq.strip())
-            st.session_state["_sr"] = _found
-            st.session_state["_sr_query"] = _sq.strip()
-        else:
-            st.warning("검색어를 입력하세요.")
+    # 자동완성 컴포넌트 (입력창만 46px iframe으로, 드롭다운은 parent DOM에 주입)
+    components.html(_get_ac_html(), height=46)
 
-    _sr = st.session_state.get("_sr", [])
-    if _sr:
-        _type_icon = {"EQUITY": "📈", "ETF": "🗂", "CRYPTOCURRENCY": "₿",
-                      "FUTURE": "⏱", "INDEX": "📊"}
-        _opt_labels = [
-            f"{_type_icon.get(r['type'], '·')} {r['ticker']}  —  {r['name']}  [{r['exchange']}]"
-            for r in _sr
-        ]
-        _sel_i = st.selectbox(
-            "검색 결과",
-            range(len(_opt_labels)),
-            format_func=lambda i: _opt_labels[i],
-            key="stock_sel_i",
-            label_visibility="collapsed",
-        )
-        _sel = _sr[_sel_i]
+    # URL 파라미터에서 선택 결과 읽기
+    _ac_t = st.query_params.get("ac_t", "")
+    _ac_n = st.query_params.get("ac_n", "")
+    _ac_x = st.query_params.get("ac_x", "")
 
-        if st.button("＋ 추가", use_container_width=True, key="stock_add_btn"):
-            _ticker = _sel["ticker"]
-            _name   = _sel["name"]
+    if _ac_t and _ac_n:
+        st.caption(f"**{_ac_n}**  `{_ac_t}`  [{_ac_x}]")
+        if st.button("＋ 추가", use_container_width=True, key="stock_add_btn", type="primary"):
             _user_stocks = load_user_stocks()
-            if any(s["ticker"] == _ticker for s in _user_stocks):
+            if any(s["ticker"] == _ac_t for s in _user_stocks):
                 st.warning("이미 추가된 종목입니다.")
             else:
-                with st.spinner(f"{_name} 수집 중..."):
-                    _price, _fund = fetch_user_stock(_name, _ticker, verbose=False)
+                with st.spinner(f"{_ac_n} 수집 중..."):
+                    _price, _fund = fetch_user_stock(_ac_n, _ac_t, verbose=False)
                 if _price.empty:
-                    st.error(f"'{_ticker}' 데이터를 가져올 수 없습니다.")
+                    st.error(f"'{_ac_t}' 데이터를 가져올 수 없습니다.")
                 else:
-                    _user_stocks.append({"name": _name, "ticker": _ticker})
+                    _user_stocks.append({"name": _ac_n, "ticker": _ac_t})
                     save_user_stocks(_user_stocks)
-                    st.session_state.pop("_sr", None)
+                    for _k in ("ac_t", "ac_n", "ac_x"):
+                        if _k in st.query_params:
+                            del st.query_params[_k]
                     st.cache_data.clear()
-                    st.success(f"{_name} 추가 완료!")
+                    st.success(f"{_ac_n} 추가 완료!")
                     st.rerun()
-
-    elif "_sr_query" in st.session_state and not _sr:
-        st.info("검색 결과가 없습니다. 다른 검색어를 사용해보세요.")
 
     # 추가된 종목 목록 + 삭제
     _user_stocks_now = load_user_stocks()
@@ -609,6 +647,113 @@ with st.sidebar:
             st.rerun()
 
 
+# ── 모의 투자 헬퍼 ────────────────────────────────────────────────────────────
+
+_BT_OPS = ["<", "<=", ">", ">="]
+
+
+def _bt_condition_rows(prefix: str, count: int) -> list[dict]:
+    """백테스트 조건 입력 행을 그린다. 지표 목록은 선택 종목 타입에 맞춰 분기한다."""
+    conds = []
+    for j in range(count):
+        vis = "visible" if j == 0 else "collapsed"
+        c1, c2, c3, c4 = st.columns([2.4, 3, 1.7, 1.6])
+        sym = c1.selectbox("종목", available_symbols,
+                           key=f"{prefix}_sym{j}", label_visibility=vis)
+        inds = _indicators_for(sym)
+        ind_key = f"{prefix}_ind{j}"
+        if ind_key in st.session_state and st.session_state[ind_key] not in inds:
+            del st.session_state[ind_key]
+        ind = c2.selectbox("지표", inds, format_func=ind_label,
+                           key=ind_key, label_visibility=vis)
+        op  = c3.selectbox("부등호", _BT_OPS, format_func=lambda o: OP_LABELS[o],
+                           key=f"{prefix}_op{j}", label_visibility=vis)
+        val = c4.number_input("값", value=-2.0, step=0.5,
+                              key=f"{prefix}_val{j}", label_visibility=vis)
+        conds.append({"symbol": sym, "indicator": ind, "op": op, "value": float(val)})
+    return conds
+
+
+def _render_backtest(res: dict):
+    """백테스트 결과(성과지표·자산곡선·거래로그)를 렌더링한다."""
+    m = res["metrics"]
+    equity, benchmark, trades = res["equity"], res["benchmark"], res["trades"]
+
+    def _pct(v):
+        return f"{'+' if v > 0 else ''}{v:.2f}%" if pd.notna(v) else "—"
+
+    cards = [
+        (_pct(m["total_return"]), "총수익률",
+         "rp" if m["total_return"] > 0 else "rn"),
+        (_pct(m["cagr"]), "CAGR",
+         "rp" if (pd.notna(m["cagr"]) and m["cagr"] > 0) else "rn"),
+        (f"{m['mdd']:.2f}%", "최대낙폭(MDD)", "rn"),
+        (f"{m['win_rate']:.1f}%" if pd.notna(m["win_rate"]) else "—", "승률",
+         "rp" if (pd.notna(m["win_rate"]) and m["win_rate"] >= 50) else "ru"),
+        (f"{m['n_trades']:,}", "거래 횟수", "rb"),
+        (f"{m['sharpe']:.2f}" if pd.notna(m["sharpe"]) else "—", "Sharpe",
+         "rp" if (pd.notna(m["sharpe"]) and m["sharpe"] > 1) else "ru"),
+    ]
+    cols = st.columns(len(cards))
+    for col, (val_s, lbl, cls) in zip(cols, cards):
+        col.markdown(
+            f'<div class="rc"><div class="rv {cls}">{val_s}</div>'
+            f'<div class="rl">{lbl}</div></div>',
+            unsafe_allow_html=True,
+        )
+    st.write("")
+
+    eb1, eb2, eb3 = st.columns(3)
+    eb1.metric("전략 총수익률", _pct(m["total_return"]))
+    eb2.metric("Buy&Hold 총수익률", _pct(m["bench_total"]))
+    eb3.metric("초과수익", _pct(m["excess_return"]),
+               delta=f"{m['excess_return']:.2f}%p")
+
+    # 자산곡선 — 누적수익률(%)로 표시해 특정 일자 수익률을 바로 읽을 수 있게
+    eq_ret = (equity / float(equity.iloc[0]) - 1) * 100
+    bench_ret = (benchmark / float(benchmark.iloc[0]) - 1) * 100
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=eq_ret.index, y=eq_ret.values, mode="lines",
+        name="전략", line=dict(color="#5a8ec2", width=1.6),
+    ))
+    fig.add_trace(go.Scatter(
+        x=bench_ret.index, y=bench_ret.values, mode="lines",
+        name="Buy&Hold", line=dict(color="#7a8899", width=1, dash="dot"),
+    ))
+    fig.add_hline(y=0, line_dash="dash", line_color="#272d3e", line_width=1)
+    fig.update_layout(
+        title="자산곡선 — 누적수익률 (전략 vs Buy&Hold)",
+        template="plotly_dark", height=360,
+        paper_bgcolor="#191d26", plot_bgcolor="#141820",
+        font_family="Arial, Malgun Gothic, sans-serif",
+        yaxis_title="누적수익률(%)",
+        margin=dict(t=46, b=20, l=20, r=20),
+        legend=dict(orientation="h", yanchor="top", y=0.99,
+                    xanchor="right", x=0.99,
+                    bgcolor="rgba(20,24,32,.7)"),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    st.divider()
+    st.markdown("**거래 로그**")
+    if trades.empty:
+        st.info("조건을 만족하는 거래가 없었습니다. 매수 조건을 완화해 보세요.")
+    else:
+        disp = trades.copy()
+        disp["진입일"] = disp["진입일"].dt.strftime("%Y-%m-%d")
+        disp["청산일"] = disp["청산일"].dt.strftime("%Y-%m-%d")
+        st.dataframe(
+            disp.style
+                .format({"진입가": "{:.2f}", "청산가": "{:.2f}",
+                         "수익률(%)": "{:+.2f}"})
+                .map(lambda v: "color:#3d9270" if v > 0 else "color:#b06868",
+                     subset=["수익률(%)"]),
+            use_container_width=True,
+            height=min(400, 60 + len(disp) * 36),
+        )
+
+
 # ── 헤더 ─────────────────────────────────────────────────────────────────────
 
 st.markdown(
@@ -617,11 +762,12 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-tab_main, tab_market, tab_corr = st.tabs(["◈ 조건부 분석", "▲ 시장 현황", "⌘ 상관관계"])
+tab_main, tab_sim, tab_market, tab_corr = st.tabs(
+    ["◈ 데이터 분석", "◇ 모의 투자", "▲ 시장 현황", "⌘ 상관관계"])
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 1 — 조건부 분석
+# TAB 1 — 데이터 분석
 # ══════════════════════════════════════════════════════════════════════════════
 
 with tab_main:
@@ -733,7 +879,7 @@ with tab_main:
                     title=f"{fwd_map[fwd]} 후  {ind_label(tgt_ind)}  분포",
                     template="plotly_dark", height=320,
                     paper_bgcolor="#191d26", plot_bgcolor="#141820",
-                    font_family="JetBrains Mono",
+                    font_family="Arial, Malgun Gothic, sans-serif",
                     margin=dict(t=40, b=20, l=20, r=20),
                 )
                 st.plotly_chart(fig, use_container_width=True)
@@ -748,7 +894,7 @@ with tab_main:
                 fig2.update_layout(
                     title="박스플롯", template="plotly_dark", height=320,
                     paper_bgcolor="#191d26", plot_bgcolor="#141820",
-                    font_family="JetBrains Mono",
+                    font_family="Arial, Malgun Gothic, sans-serif",
                     showlegend=False,
                     margin=dict(t=40, b=20, l=20, r=20),
                 )
@@ -797,7 +943,7 @@ with tab_main:
                     title=f"{tgt_sym} — 조건 발생 시점",
                     template="plotly_dark", height=260,
                     paper_bgcolor="#191d26", plot_bgcolor="#141820",
-                    font_family="JetBrains Mono",
+                    font_family="Arial, Malgun Gothic, sans-serif",
                     margin=dict(t=40, b=20, l=20, r=20),
                 )
                 st.plotly_chart(fig3, use_container_width=True)
@@ -807,7 +953,128 @@ with tab_main:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 2 — 시장 현황
+# TAB 2 — 모의 투자 (백테스트)
+# ══════════════════════════════════════════════════════════════════════════════
+
+with tab_sim:
+    if not available_symbols:
+        st.error("데이터 없음. 사이드바에서 '데이터 업데이트'를 누르세요.")
+    else:
+        st.markdown(
+            "**매수 신호가 발생하면 진입하고, 청산 규칙에 따라 매도하는 전략을 "
+            "과거 데이터로 시뮬레이션합니다.** "
+            "데이터 분석 탭에서 검증한 조건을 그대로 매수 신호로 쓸 수 있습니다."
+        )
+
+        # ── 매매 대상 · 기간 ──────────────────────────────────────────────────
+        st.divider()
+        st.caption("**매매 대상**")
+        bt_c1, bt_c2, bt_c3 = st.columns([2, 1.5, 1.5])
+        bt_symbol = bt_c1.selectbox("종목", available_symbols, key="bt_symbol")
+        bt_start  = bt_c2.date_input("시작일", value=date(2015, 1, 1), key="bt_start")
+        bt_end    = bt_c3.date_input("종료일", value=date.today(), key="bt_end")
+
+        # ── 매수 조건 ─────────────────────────────────────────────────────────
+        st.divider()
+        st.caption("**매수 조건** — 충족 시 진입")
+        bc1, bc2 = st.columns([1, 4])
+        bt_buy_n = bc1.number_input("조건 수", 1, 3, 1, key="bt_buy_n")
+        bt_buy_logic = bc2.radio(
+            "결합", ["AND", "OR"], horizontal=True, key="bt_buy_logic",
+            help="AND = 모든 조건 충족,  OR = 하나라도 충족",
+        )
+        bt_buy_conds = _bt_condition_rows("bt_buy", int(bt_buy_n))
+
+        # ── 청산 규칙 ─────────────────────────────────────────────────────────
+        st.divider()
+        st.caption("**청산 규칙** — 가장 먼저 도달하는 조건으로 매도")
+        ex1, ex2, ex3 = st.columns(3)
+        with ex1:
+            bt_use_hold = st.checkbox("보유기간", value=True, key="bt_use_hold")
+            bt_hold = st.number_input("거래일 후 매도", 1, 250, 20, key="bt_hold",
+                                      disabled=not bt_use_hold)
+        with ex2:
+            bt_use_tp = st.checkbox("익절(%)", value=False, key="bt_use_tp")
+            bt_tp = st.number_input("목표수익 도달 시", 0.5, 500.0, 10.0, step=0.5,
+                                    key="bt_tp", disabled=not bt_use_tp)
+        with ex3:
+            bt_use_sl = st.checkbox("손절(%)", value=False, key="bt_use_sl")
+            bt_sl = st.number_input("최대손실 도달 시", -500.0, -0.5, -5.0, step=0.5,
+                                    key="bt_sl", disabled=not bt_use_sl)
+
+        tr1, tr2, _tr3 = st.columns(3)
+        with tr1:
+            bt_use_tatr = st.checkbox("ATR 트레일링", value=False, key="bt_use_tatr",
+                                      help="고점 − N×ATR(14) 하회 시 매도 (Chandelier Exit)")
+            bt_tatr = st.number_input("ATR 배수", 0.5, 10.0, 3.0, step=0.5,
+                                      key="bt_tatr", disabled=not bt_use_tatr)
+        with tr2:
+            bt_use_tpct = st.checkbox("비율 트레일링(%)", value=False, key="bt_use_tpct",
+                                      help="진입 후 최고 종가 대비 X% 하락 시 매도")
+            bt_tpct = st.number_input("고점대비 하락", 0.5, 90.0, 10.0, step=0.5,
+                                      key="bt_tpct", disabled=not bt_use_tpct)
+
+        bt_use_sellcond = st.checkbox("매도 조건 사용", value=False,
+                                      key="bt_use_sellcond")
+        if bt_use_sellcond:
+            sc1, sc2 = st.columns([1, 4])
+            bt_sell_n = sc1.number_input("조건 수", 1, 3, 1, key="bt_sell_n")
+            bt_sell_logic = sc2.radio("결합", ["AND", "OR"], horizontal=True,
+                                      key="bt_sell_logic")
+            bt_sell_conds = _bt_condition_rows("bt_sell", int(bt_sell_n))
+        else:
+            bt_sell_conds, bt_sell_logic = None, "AND"
+
+        # ── 거래 설정 ─────────────────────────────────────────────────────────
+        st.divider()
+        st.caption("**거래 설정**")
+        tc1, tc2, tc3, tc4 = st.columns(4)
+        bt_capital = tc1.number_input("초기자본", 1_000_000, 100_000_000_000,
+                                      10_000_000, step=1_000_000, key="bt_capital")
+        bt_fill = tc2.selectbox("체결 방식", ["익일 시가", "당일 종가"], key="bt_fill",
+                                help="익일 시가 = look-ahead bias 방지 (권장)")
+        bt_comm = tc3.number_input("수수료(%)", 0.0, 5.0, 0.015, step=0.005,
+                                   format="%.3f", key="bt_comm")
+        bt_slip = tc4.number_input("슬리피지(%)", 0.0, 5.0, 0.05, step=0.01,
+                                   format="%.3f", key="bt_slip")
+
+        if st.button("▶  백테스트 실행", type="primary", use_container_width=True,
+                     key="bt_run"):
+            if bt_start >= bt_end:
+                st.error("시작일은 종료일보다 빨라야 합니다.")
+                st.session_state.pop("bt_result", None)
+            elif not (bt_use_hold or bt_use_tp or bt_use_sl
+                      or bt_use_tatr or bt_use_tpct or bt_use_sellcond):
+                st.error("청산 규칙을 1개 이상 선택하세요.")
+                st.session_state.pop("bt_result", None)
+            else:
+                st.session_state["bt_result"] = run_backtest(
+                    data=data, trade_symbol=bt_symbol,
+                    buy_conditions=bt_buy_conds, buy_logic=bt_buy_logic,
+                    hold_days=int(bt_hold) if bt_use_hold else None,
+                    take_profit=float(bt_tp) if bt_use_tp else None,
+                    stop_loss=float(bt_sl) if bt_use_sl else None,
+                    trail_atr_mult=float(bt_tatr) if bt_use_tatr else None,
+                    trail_pct=float(bt_tpct) if bt_use_tpct else None,
+                    sell_conditions=bt_sell_conds, sell_logic=bt_sell_logic,
+                    fill="next_open" if bt_fill == "익일 시가" else "close",
+                    commission=bt_comm / 100,
+                    slippage=bt_slip / 100,
+                    initial_capital=float(bt_capital),
+                    start=bt_start, end=bt_end,
+                )
+
+        bt_result = st.session_state.get("bt_result")
+        if bt_result:
+            st.divider()
+            if not bt_result["success"]:
+                st.error(f"백테스트 실패: {bt_result['error']}")
+            else:
+                _render_backtest(bt_result)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 3 — 시장 현황
 # ══════════════════════════════════════════════════════════════════════════════
 
 with tab_market:
@@ -863,7 +1130,7 @@ with tab_market:
         fig_c.update_layout(
             title=sym_sel, template="plotly_dark", height=380,
             paper_bgcolor="#191d26", plot_bgcolor="#141820",
-            font_family="JetBrains Mono",
+            font_family="Arial, Malgun Gothic, sans-serif",
             xaxis_rangeslider_visible=False,
             margin=dict(t=40, b=20, l=20, r=20),
         )
@@ -881,7 +1148,7 @@ with tab_market:
             fig_r.update_layout(
                 title="RSI(14)", template="plotly_dark", height=190,
                 paper_bgcolor="#191d26", plot_bgcolor="#141820",
-                font_family="JetBrains Mono",
+                font_family="Arial, Malgun Gothic, sans-serif",
                 yaxis=dict(range=[0, 100]),
                 margin=dict(t=35, b=15, l=20, r=20),
             )
@@ -889,7 +1156,7 @@ with tab_market:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 3 — 크로스에셋 상관관계
+# TAB 4 — 크로스에셋 상관관계
 # ══════════════════════════════════════════════════════════════════════════════
 
 with tab_corr:
@@ -918,7 +1185,7 @@ with tab_corr:
             template="plotly_dark", aspect="auto", height=460,
         )
         fig_hm.update_layout(
-            paper_bgcolor="#191d26", font_family="JetBrains Mono",
+            paper_bgcolor="#191d26", font_family="Arial, Malgun Gothic, sans-serif",
             margin=dict(t=50, b=20, l=20, r=20),
         )
         st.plotly_chart(fig_hm, use_container_width=True)
@@ -972,7 +1239,7 @@ with tab_corr:
             yaxis_title=f"{cc_s2} 전일대비(%)",
             template="plotly_dark", height=360,
             paper_bgcolor="#191d26", plot_bgcolor="#141820",
-            font_family="JetBrains Mono",
+            font_family="Arial, Malgun Gothic, sans-serif",
             margin=dict(t=50, b=30, l=40, r=20),
         )
         st.plotly_chart(fig_sc, use_container_width=True)
