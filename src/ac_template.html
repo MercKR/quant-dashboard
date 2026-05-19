@@ -17,8 +17,8 @@ var DB=[];
 var P=window.parent,PDOC=P.document;
 var dd=null,sel=-1,hits=[],timer=null;
 
-/* DB를 정적 파일로 비동기 로드 */
-fetch('/app/static/ticker_db.json')
+/* DB를 정적 파일로 비동기 로드 (상대경로 — Streamlit Cloud의 /~/+/ 프록시 경로 대응) */
+fetch('app/static/ticker_db.json')
   .then(function(r){return r.json();})
   .then(function(data){DB=data;})
   .catch(function(){DB=[];});
