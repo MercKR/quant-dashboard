@@ -12,8 +12,15 @@ import plotly.express as px
 import streamlit as st
 import streamlit.components.v1 as components
 
-from data_fetcher import fetch_all, load_all, ALL_SYMBOLS
-from indicators import compute_all, get_indicator_columns, get_indicator_label, INDICATOR_META
+from data_fetcher import (
+    fetch_all, load_all, load_fund_all, ALL_SYMBOLS,
+    load_user_stocks, save_user_stocks,
+    fetch_user_stock, fetch_stock_fundamentals,
+)
+from indicators import (
+    compute_all, get_indicator_columns, get_all_indicator_columns,
+    get_indicator_label, INDICATOR_META, FUND_INDICATOR_COLS,
+)
 from analysis import run_analysis, run_temporal_stability, OP_LABELS, OPS
 
 # ── 페이지 설정 ──────────────────────────────────────────────────────────────
@@ -94,11 +101,20 @@ def get_data():
     raw = load_all()
     if not raw:
         raw = fetch_all(verbose=False)
-    return {sym: compute_all(df) for sym, df in raw.items() if not df.empty}
+    fund = load_fund_all()
+    return {sym: compute_all(df, fund.get(sym)) for sym, df in raw.items() if not df.empty}
 
 data = get_data()
-available_symbols = [s for s in ALL_SYMBOLS if s in data]
-indicator_cols = get_indicator_columns()
+
+# 기본 심볼 + 사용자 추가 종목 순서
+_user_stock_names = [s["name"] for s in load_user_stocks()]
+available_symbols = (
+    [s for s in ALL_SYMBOLS if s in data] +
+    [s for s in _user_stock_names if s in data and s not in ALL_SYMBOLS]
+)
+
+# 지표 목록: 기본 + 펀더멘털 (펀더멘털은 개별종목에만 존재)
+indicator_cols = get_all_indicator_columns()
 ind_labels = {col: get_indicator_label(col) for col in indicator_cols}
 
 def ind_label(col): return ind_labels.get(col, col)
@@ -504,7 +520,61 @@ with st.sidebar:
     for sym in available_symbols:
         df = data[sym]
         last = df.index[-1].strftime("%m-%d") if not df.empty else "N/A"
-        st.caption(f"**{sym}**: {len(df):,}일 · {last}")
+        has_fund = any(c in df.columns for c in FUND_INDICATOR_COLS)
+        fund_tag = " ·F" if has_fund else ""
+        st.caption(f"**{sym}**: {len(df):,}일 · {last}{fund_tag}")
+
+    # ── 개별종목 관리 ──────────────────────────────────────────────────────
+    st.divider()
+    st.caption("**개별종목 추가**")
+    new_ticker = st.text_input("티커", placeholder="AAPL  /  005930.KS", key="new_ticker",
+                                label_visibility="collapsed")
+    new_name   = st.text_input("표시 이름", placeholder="표시 이름 (예: 애플)", key="new_name",
+                                label_visibility="collapsed")
+
+    if st.button("＋ 종목 추가", use_container_width=True):
+        _ticker = new_ticker.strip().upper()
+        _name   = new_name.strip()
+        if not _ticker or not _name:
+            st.warning("티커와 이름을 모두 입력하세요.")
+        else:
+            _user_stocks = load_user_stocks()
+            if any(s["ticker"] == _ticker or s["name"] == _name for s in _user_stocks):
+                st.warning("이미 추가된 종목입니다.")
+            else:
+                with st.spinner(f"{_name} 데이터 수집 중..."):
+                    _price, _fund = fetch_user_stock(_name, _ticker, verbose=False)
+                if _price.empty:
+                    st.error(f"'{_ticker}' 데이터를 가져올 수 없습니다. 티커를 확인하세요.")
+                else:
+                    _user_stocks.append({"name": _name, "ticker": _ticker})
+                    save_user_stocks(_user_stocks)
+                    st.cache_data.clear()
+                    st.success(f"{_name} 추가 완료!")
+                    st.rerun()
+
+    # 추가된 종목 목록 + 삭제
+    _user_stocks_now = load_user_stocks()
+    if _user_stocks_now:
+        st.caption("**추가된 종목**")
+        for _s in _user_stocks_now:
+            _c1, _c2 = st.columns([3, 1])
+            _c1.caption(f"{_s['name']} ({_s['ticker']})")
+            if _c2.button("✕", key=f"del_{_s['ticker']}"):
+                _updated = [x for x in _user_stocks_now if x["ticker"] != _s["ticker"]]
+                save_user_stocks(_updated)
+                st.cache_data.clear()
+                st.rerun()
+
+    # 펀더멘털 재수집 버튼 (종목이 있을 때만 표시)
+    if _user_stocks_now:
+        if st.button("↺ 펀더멘털 재수집", use_container_width=True, help="분기 재무 데이터를 최신화합니다."):
+            with st.spinner("펀더멘털 수집 중..."):
+                for _s in _user_stocks_now:
+                    fetch_stock_fundamentals(_s["name"], _s["ticker"])
+                st.cache_data.clear()
+            st.success("완료!")
+            st.rerun()
 
 
 # ── 헤더 ─────────────────────────────────────────────────────────────────────
